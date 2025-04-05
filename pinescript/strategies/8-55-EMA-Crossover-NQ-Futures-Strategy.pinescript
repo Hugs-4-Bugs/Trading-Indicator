@@ -1,0 +1,256 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// An Example Futures Strategy Built by Mike Christensen with TradersPost.io (@Mik3Christ3ns3n)
+
+// DISCLAIMER: Trading in the financial markets involves a risk of loss.  Content and strategies produced
+// by TradersPost are for informational or educational purposes only and do not constitute trading or
+// investment recommendations or advice.
+
+import TradersPostInc/WebhookMessageLibrary/1 as wm
+cnst = wm.CONSTANTS.new()
+
+// @version=5
+strategy("8-55 EMA Crossover NQ/MNQ Futures Strategy", shorttitle="8-55 Cross", overlay=true, initial_capital = 5000, pyramiding = 1, default_qty_type = strategy.fixed, default_qty_value = 1, calc_on_every_tick = true, process_orders_on_close = false, use_bar_magnifier = false, commission_type = strategy.commission.cash_per_contract, commission_value = 0.82, slippage = 5)
+max_bars_back(time, 5000)
+strategy.risk.max_intraday_filled_orders(10)
+
+// ===============
+// ==== Notes ====
+// ===============
+
+// This is an example strategy built to showcase the automation capabilities of TradersPost in
+// trading Nasdaq 100 NQ and MNQ futures on the 5, 30, and 60 minute interval.
+
+// Always paper trade first! Before running ANY strategy with live capital, always create a free
+// TradersPost paper trading broker connection and let the strategy trade for at least two weeks
+// before subscribing the strategy to a live broker. This will give you time to see how the
+// trades behave and catch any unexpected behavior.
+
+// ==========================================
+// ==== Attaching a Broker Trailing Stop ====
+// ==========================================
+
+// This strategy has a built-in trailing stop, but if you prefer to have the trailing stop attached
+// to your entry order with the broker, you can enable this feature in the strategy settings.
+
+// =====================================
+// ==== Automating with TradersPost ====
+// =====================================
+
+// You can automate this strategy with any paper or live broker that supports futures on TradersPost.
+// Create an alert for this strategy and under Condition ensure it is set to: "alert() function calls only",
+// then supply your TradersPost webhook URL under the Notifications tab.
+
+// Using any other alert condition besides "alert() function calls only" could result in duplicated trades.
+// This is because the strategy functions send alerts along with the alert function call. Since the logic
+// of this strategy uses the alerts function calls to send signals to TradersPost, and the strategy
+// functions are only meant to see the performance of the strategy in TradingView, creating alerts
+// with order fills and alert function calls will send duplicate signals.
+
+// ===========================
+// ==== Backtest Settings ====
+// ===========================
+
+var group1 = "Backtest Range"
+fromMonth = input.int(defval = 1,    title = "From Month",  minval = 1, maxval = 12, inline = "1", group = group1)
+fromDay   = input.int(defval = 1,    title = "Day",    minval = 1, maxval = 31, inline = "1", group = group1)
+fromYear  = input.int(defval = 2018, title = "Year",   minval = 1970, inline = "1", group = group1)
+thruMonth = input.int(defval = 1,    title = "To Month",  minval = 1, maxval = 12, inline = "2", group = group1)
+thruDay   = input.int(defval = 1,    title = "Day",    minval = 1, maxval = 31, inline = "2", group = group1)
+thruYear  = input.int(defval = 2300, title = "Year",   minval = 1970, inline = "2", group = group1)
+
+// =====================
+// ==== Trade Rules ====
+// =====================
+
+var group2 = "Trade Rules"
+tradeTimes = input.session("0900-1455", title="Position Entry Window", group=group2)
+minPrevDayVolume = input.int(defval = 1000, title = "Previous Day Volume Threshold", minval = 1, maxval = 10000000, tooltip = "The minimum contract volume from the previous day to allow trading for today.", group = group2)
+defaultQty = input.int(defval=1, title="Default Contract Quantity", minval = 1, maxval = 10000000, step=1, group=group2, tooltip="The quantity of contracts to buy or sell for the entry. Note: If you have defined the Position size settings in your TradersPost subscription settings, this value is ignored.")
+retestBars = input.int(defval=6, title="Close Above 8 EMA within X Bars", minval = 1, maxval = 10000000, step=1, group=group2, tooltip="When price retraces to the 55 EMA and closes above the 8 EMA, it must do so within a certain number of bars. The default is 6 bars.")
+attachTrail = input.bool(false, title="Attach Broker Trailing Stop", group=group2, tooltip="When using alert() function calls only for your entry alert condition, the strategy will attach trailing stop instructions to your entry order so that the broker handles the trailing stop instead of the strategy. Note: Many brokers use the close price as the trailing stop source. If your trailing stop source is different than what the broker uses, the performance may differ.")
+
+var group3 = "Long Entry Rules"
+allow_long = input.bool(true, title="Allow Longs", group=group3)
+longTrailPerc = input.float(title="Trail Long Loss (%)", minval=0.0, step=0.1, defval=0.75, group = group3) * 0.01
+longTrailSrc = input.source(high, title="Trail Long Source", group=group3, tooltip = "Price to observe when lifting the trailing stop. Typically this is set to the close price. Note: This value is ignored if you attach the broker trailing stop.")
+
+var group4 = "Short Entry Rules"
+allow_short = input.bool(false, title="Allow Shorts", group=group4)
+shortTrailPerc = input.float(title="Trail Short Loss (%)", minval=0.0, step=0.1, defval=1, group = group4) * 0.01
+shortTrailSrc = input.source(low, title="Trail Short Source", group=group4, tooltip = "Price to observe when lowering the trailing stop. Typically this is set to the close price. Note: This value is ignored if you attach the broker trailing stop.")
+
+InSession(sessionTimes) =>
+    not na(time(timeframe.period, sessionTimes))
+
+bgcolor(color=InSession(tradeTimes) ? color.new(color.green, 90) : color.new(color.white, 99))
+
+// ============================
+// ==== Indicator Settings ====
+// ============================
+
+var group5 = "Indicator Settings"
+ema1len = input.int(8, minval=1, title="5m EMA 1 Length", group = group5)
+ema2len = input.int(55, minval=1, title="5m EMA 2 Length", group = group5)
+ema15len = input.int(165, minval=1, title="15m EMA Length", group = group5, tooltip = "Should be 3x the 5 minute 55 EMA length.")
+src = input(close, title="EMA Source", group = group5)
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)            // backtest start  window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)            // backtest finish window
+window()  => time >= start and time <= finish ? true : false           // create function "within window of time"
+
+longStopPrice = 0.0, shortStopPrice = 0.0
+
+volume_yesterday = request.security(syminfo.tickerid, "1D", volume[1])
+plot(volume_yesterday, title = "Volume Yesterday", display = display.data_window)
+
+//previous day low used to filter short side
+yesterday_low = request.security(syminfo.tickerid, 'D', low[1])
+plot(yesterday_low, title="Yesterday Low", display = display.data_window)
+
+// ================================
+// ==== EMA Indicator Settings ====
+// ================================
+
+// set up ema 1 and 2
+ema1 = ta.ema(src, ema1len)
+ema2 = ta.ema(src, ema2len)
+// check 15 minute EMA
+ema15step = ta.ema(src, ema15len)
+
+//establish direction (1 == long, 0 == short, -1 == no trade)
+trade_direction = ema2 >= ema15step and ema1 > ema2 ? 1 : ema2 <= ema15step and ema1 < ema2 ? 0 : -1
+plot(trade_direction, title="Trade Direction", display = display.data_window)
+
+//col = ema1 > ema15step ? color.lime : ema1 < ema15step ? color.red : color.yellow
+col = trade_direction == 1 ? color.lime : trade_direction == 0 ? color.red : color.yellow
+plot(ema1, title = "EMA Short", color=col, linewidth = 1, display = display.all)
+plot(ema2, title = "EMA Long", color=col, linewidth = 2, display = display.all)
+plot(ema15step, title = "15 Minute EMA", color=col, linewidth=3, style = plot.style_stepline, display = display.all)
+
+// =======================
+// ==== Trading Logic ====
+// =======================
+
+// must retest 55 ema within direction change window
+long_ema2_retest_bars = ta.barssince(low < ema2)
+short_ema2_retest_bars = ta.barssince(high > ema2)
+// take trade above ema1 within 5 bars of 55 ema retest
+long_close_above_ema1 = close > ema1 ? 1 : 0
+short_close_below_ema1 = close < ema1 ? 1 : 0
+
+strat_pos_size = strategy.position_size
+
+// ===============================
+// ==== Long Trade Conditions ====
+// ===============================
+
+// must meet volume condition
+l_cond0 = volume_yesterday >= minPrevDayVolume
+// must trade in session
+l_cond1 = InSession(tradeTimes) and window()
+//must be a long trade direction
+l_cond2 = trade_direction == 1
+//must have retested within the last x bars
+l_cond3 = long_ema2_retest_bars >= 0 and long_ema2_retest_bars < retestBars
+//must be closed above the ema1
+l_cond4 = long_close_above_ema1 == 1
+//now combined into one condition
+long_condition = l_cond0 and l_cond1 and l_cond2 and l_cond3 and l_cond4
+
+plotchar(long_condition, "LONG ENTRY", "◆", location.abovebar, color.green, size = size.tiny)
+
+if (allow_long == true and strategy.opentrades < defaultQty and long_condition and barstate.isconfirmed)
+    longAlertMessage = wm.webhookMessage.new(
+      action = cnst.ACTION_BUY,
+      quantity = defaultQty,
+      price = close,
+      stopLoss = attachTrail == true ? wm.stopLossMessage.new(type=cnst.STOP_LOSS_TYPE_TRAILING_STOP, trailPercent = longTrailPerc * 100).buildStopLossJson() : ""
+      ).buildWebhookJson()
+
+    alert(longAlertMessage, alert.freq_once_per_bar)
+    strategy.entry("Long Entry", direction=strategy.long, qty=defaultQty)
+
+// set up trailing stop for the long
+longStopPrice := if (strategy.position_size > 0)
+    stopValue = longTrailSrc * (1 - longTrailPerc)
+    math.max(stopValue, longStopPrice[1])
+else
+    0
+
+plot(series=(strategy.position_size > 0) ? longStopPrice : na, color=color.fuchsia, style=plot.style_cross, linewidth=1, title="Long Trail Stop")
+
+longAlertExitMessage = wm.webhookMessage.new(action = cnst.ACTION_EXIT, price = close).buildWebhookJson()
+
+// Trailing stop signal is sent to TradersPost. Be sure your alert uses "alert() function calls only"
+// for this to function properly.
+if (attachTrail == false and strat_pos_size[1] > 0 and strat_pos_size == 0 and low <= longStopPrice[1])
+    alert(longAlertExitMessage, alert.freq_once_per_bar)
+
+// Trailing stop signal is sent to TradingView's backtest.
+if (strategy.position_size > 0)
+    strategy.exit(id="Trailing Exit", stop=longStopPrice)
+
+// Close the long positions if the direction indictator flips to bearish.
+// An exit signal is sent to TradersPost to cancel any existing stop orders and exit the position.
+// If you attached the broker trailing stop, that order will be cancelled.
+if (strategy.opentrades > 0 and strategy.opentrades.size(0) > 0 and trade_direction == 0 and barstate.isconfirmed)
+    strategy.close_all("Direction Exit")
+    alert(longAlertExitMessage, alert.freq_once_per_bar)
+
+// ================================
+// ==== Short Trade Conditions ====
+// ================================
+
+// must meet volume condition
+s_cond0 = volume_yesterday >= minPrevDayVolume
+// must trade in session
+s_cond1 = InSession(tradeTimes) and window()
+// must be a short trade direction
+s_cond2 = trade_direction == 0
+// must have retested in the last x bars
+s_cond3 = short_ema2_retest_bars >= 0 and short_ema2_retest_bars < retestBars
+// must close below the ema1
+s_cond4 = short_close_below_ema1 == 1
+// close must be inside the previous day high and low range
+s_cond5 = close >= yesterday_low
+//now combined into one condition
+short_condition = s_cond0 and s_cond1 and s_cond2 and s_cond3 and s_cond4 and s_cond5
+
+plotchar(short_condition, "SHORT ENTRY", "◆", location.belowbar, color.red, size = size.tiny)
+
+if (allow_short == true and strategy.opentrades < defaultQty and short_condition and barstate.isconfirmed)
+    shortAlertMessage = wm.webhookMessage.new(
+      action = cnst.ACTION_SELL,
+      quantity = defaultQty,
+      price = close,
+      stopLoss = attachTrail == true ? wm.stopLossMessage.new(type=cnst.STOP_LOSS_TYPE_TRAILING_STOP, trailPercent = shortTrailPerc * 100).buildStopLossJson() : ""
+      ).buildWebhookJson()
+    alert(shortAlertMessage, alert.freq_once_per_bar)
+    strategy.entry("Short Entry", direction=strategy.short, qty=defaultQty)
+
+// set up trailing stop for the short
+shortStopPrice := if (strategy.position_size < 0)
+    stopValue = shortTrailSrc * (1 + shortTrailPerc)
+    math.min(stopValue, shortStopPrice[1])
+else
+    9999999
+
+plot(series=(strategy.position_size < 0) ? shortStopPrice : na, color=color.fuchsia, style=plot.style_cross, linewidth=1, title="Short Trail Stop")
+
+shortAlertExitMessage = wm.webhookMessage.new(action = cnst.ACTION_EXIT, price = close).buildWebhookJson()
+
+// Trailing stop signal is sent to TradersPost. Be sure your alert uses "alert() function calls only"
+// for this to function properly.
+if (attachTrail == false and strat_pos_size[1] < 0 and strat_pos_size == 0 and high >= shortStopPrice[1])
+    alert(shortAlertExitMessage, alert.freq_once_per_bar)
+
+// Trailing stop signal is sent to TradingView's backtest.
+if (strategy.position_size < 0)
+    strategy.exit(id="Trailing Exit", stop=shortStopPrice)
+
+// Close the short positions if the direction indictator flips to bullish.
+// An exit signal is sent to TradersPost to cancel any existing stop orders and exit the position.
+// If you attached the broker trailing stop, that order will be cancelled.
+if (strategy.opentrades > 0 and strategy.opentrades.size(0) < 0 and trade_direction == 1 and barstate.isconfirmed)
+    strategy.close_all("Direction Exit")
+    alert(shortAlertExitMessage, alert.freq_once_per_bar)
